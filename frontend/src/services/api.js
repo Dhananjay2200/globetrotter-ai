@@ -3,7 +3,7 @@
  * Connects to the FastAPI backend with proxy support and full fallback handling.
  */
 
-const API_BASE = '/api/v1';
+const API_BASE = 'https://globetrotter-ai-e58e.onrender.com/api/v1';
 
 async function fetchJson(endpoint, options = {}) {
   const url = `${API_BASE}${endpoint}`;
