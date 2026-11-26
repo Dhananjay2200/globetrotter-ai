@@ -1,89 +1,172 @@
-import React, { useState, useEffect } from 'react';
-import UserBlogPortal from './views/UserBlogPortal';
-import AdminPortal from './views/AdminPortal';
-import BlogPostModal from './components/BlogPostModal';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { api } from './services/api';
+import AdminPortal from './views/AdminPortal';
+import Header from './components/Header';
+import HeroSection from './components/HeroSection';
+import EditorialGrid from './components/EditorialGrid';
+import ArticleDetailPage from './components/ArticleDetailPage';
+import BookmarksDrawer from './components/BookmarksDrawer';
+import {
+  EmptyState,
+  ErrorBanner,
+  GridSkeleton,
+  HeroSkeleton,
+} from './components/States';
+
+const BOOKMARKS_KEY = 'world_tourist_bookmarks';
+
+function isAdminLocation() {
+  const hash = window.location.hash.toLowerCase();
+  const path = window.location.pathname.toLowerCase();
+  const search = window.location.search.toLowerCase();
+  return (
+    path === '/admin' ||
+    path.endsWith('/admin') ||
+    path.includes('/admin/') ||
+    hash === '#admin' ||
+    search.includes('portal=admin')
+  );
+}
+
+function loadSavedBookmarks() {
+  try {
+    const raw = localStorage.getItem(BOOKMARKS_KEY);
+    const parsed = raw ? JSON.parse(raw) : [];
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
 
 export default function App() {
-  // Determine initial portal based on URL hash or path
-  const [portal, setPortal] = useState(() => {
-    const hash = window.location.hash.toLowerCase();
-    const path = window.location.pathname.toLowerCase();
-    const search = window.location.search.toLowerCase();
-    if (hash === '#admin' || path.includes('/admin') || search.includes('portal=admin')) {
-      return 'admin';
-    }
-    return 'user';
-  });
-
+  const [portal, setPortal] = useState(() => (isAdminLocation() ? 'admin' : 'user'));
   const [posts, setPosts] = useState([]);
-  const [selectedPost, setSelectedPost] = useState(null);
+  const [metadata, setMetadata] = useState({ regions: [], categories: [] });
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(null);
 
-  // Synchronize hash routing
-  useEffect(() => {
-    const handleHashChange = () => {
-      const hash = window.location.hash.toLowerCase();
-      if (hash === '#admin') {
-        setPortal('admin');
-      } else {
-        setPortal('user');
-        loadFeed();
-      }
+  // Filter & Search States
+  const [searchQuery, setSearchQuery] = useState('');
+  const [filterMode, setFilterMode] = useState('regions'); // 'regions' | 'categories'
+  const [activeRegion, setActiveRegion] = useState('All');
+  const [activeCategory, setActiveCategory] = useState('All');
+
+  // Detail View & Bookmarks States
+  const [selectedPost, setSelectedPost] = useState(null);
+  const [bookmarks, setBookmarks] = useState(loadSavedBookmarks);
+  const [bookmarksOpen, setBookmarksOpen] = useState(false);
+
+  const fetchAndSyncContent = useCallback(async () => {
+    const [feedData, metaData] = await Promise.all([
+      api.getFeed({ limit: 150, offset: 0 }),
+      api.getMetadata().catch(() => null),
+    ]);
+
+    const fetchedPosts = Array.isArray(feedData?.posts) ? feedData.posts : [];
+    const apiRegions = Array.isArray(metaData?.global_regions) ? metaData.global_regions : [];
+    const apiCategories = Array.isArray(metaData?.tourism_categories)
+      ? metaData.tourism_categories
+      : [];
+
+    const postRegions = Array.from(
+      new Set(fetchedPosts.map((p) => p.region).filter(Boolean))
+    );
+    const postCategories = Array.from(
+      new Set(fetchedPosts.map((p) => p.category).filter(Boolean))
+    );
+
+    return {
+      fetchedPosts,
+      regions: apiRegions.length > 0 ? apiRegions : postRegions,
+      categories: apiCategories.length > 0 ? apiCategories : postCategories,
     };
-
-    window.addEventListener('hashchange', handleHashChange);
-    return () => window.removeEventListener('hashchange', handleHashChange);
   }, []);
 
-  const loadFeed = async (silent = false) => {
-    if (!silent) setLoading(true);
+  const loadContent = useCallback(async () => {
+    setLoading(true);
+    setError(null);
     try {
-      const data = await api.getFeed(null, null, 100);
-      setPosts(data.posts || []);
+      const data = await fetchAndSyncContent();
+      setPosts(data.fetchedPosts);
+      setMetadata({ regions: data.regions, categories: data.categories });
     } catch (err) {
-      console.error('Failed to load blog feed:', err);
+      setError(err?.message || 'Unable to connect to the backend service.');
     } finally {
-      if (!silent) setLoading(false);
+      setLoading(false);
     }
-  };
+  }, [fetchAndSyncContent]);
 
   useEffect(() => {
-    loadFeed();
-    // Silently poll for newly published articles every 3 seconds
-    const interval = setInterval(() => {
-      loadFeed(true);
-    }, 3000);
+    let active = true;
+    fetchAndSyncContent()
+      .then((data) => {
+        if (!active) return;
+        setPosts(data.fetchedPosts);
+        setMetadata({ regions: data.regions, categories: data.categories });
+        setError(null);
+      })
+      .catch((err) => {
+        if (!active) return;
+        setError(err?.message || 'Unable to connect to the backend service.');
+      })
+      .finally(() => {
+        if (active) setLoading(false);
+      });
+    return () => {
+      active = false;
+    };
+  }, [fetchAndSyncContent]);
 
-    // Refresh immediately when window gains focus or tab becomes active
-    const handleFocus = () => {
-      if (document.visibilityState === 'visible') {
-        loadFeed(true);
+  // Sync URL navigation (/admin, #admin, #post/<slug>)
+  useEffect(() => {
+    const syncFromUrl = async () => {
+      if (isAdminLocation()) {
+        setPortal('admin');
+        return;
+      }
+
+      setPortal('user');
+      const hash = window.location.hash;
+      if (hash.startsWith('#post/')) {
+        const slug = decodeURIComponent(hash.slice('#post/'.length));
+        const localMatch = posts.find((p) => p.slug === slug);
+        if (localMatch) {
+          setSelectedPost(localMatch);
+          return;
+        }
+        try {
+          const singlePost = await api.getPostBySlug(slug);
+          setSelectedPost(singlePost);
+        } catch {
+          setSelectedPost(null);
+        }
+      } else {
+        setSelectedPost(null);
       }
     };
-    window.addEventListener('focus', handleFocus);
-    document.addEventListener('visibilitychange', handleFocus);
 
+    syncFromUrl();
+    window.addEventListener('hashchange', syncFromUrl);
+    window.addEventListener('popstate', syncFromUrl);
     return () => {
-      clearInterval(interval);
-      window.removeEventListener('focus', handleFocus);
-      document.removeEventListener('visibilitychange', handleFocus);
+      window.removeEventListener('hashchange', syncFromUrl);
+      window.removeEventListener('popstate', syncFromUrl);
     };
-  }, []);
+  }, [posts]);
 
-  const switchToAdmin = () => {
-    setPortal('admin');
-    window.location.hash = '#admin';
-  };
-
-  const switchToUser = () => {
+  // Exit from Admin back to World Tourist public portal
+  const exitToUserPortal = () => {
     setPortal('user');
-    window.location.hash = '#stories';
-    loadFeed();
+    setSelectedPost(null);
+    const targetPath = window.location.pathname.toLowerCase().includes('/admin')
+      ? '/'
+      : window.location.pathname;
+    window.history.pushState('', document.title, targetPath);
+    loadContent();
   };
 
-  // Handle article selection from either Admin table or User feed
-  const handleSelectArticleFromDashboard = async (article) => {
+  // Preview or open article triggered from AdminPortal
+  const handleSelectArticleFromAdmin = async (article) => {
     try {
       if (article.status === 'published' && article.slug) {
         const fullPost = await api.getPostBySlug(article.slug);
@@ -101,23 +184,27 @@ export default function App() {
           body_markdown: detail.body_markdown,
           word_count: detail.word_count,
           quality_score: detail.quality_score,
-          featured_image: detail.images?.[0] ? {
-            url: detail.images[0].image_url,
-            alt_text: detail.images[0].alt_text,
-            attribution: detail.images[0].attribution,
-            license: detail.images[0].license_name,
-          } : null,
-          gallery_images: detail.images?.slice(1).map(img => ({
-            url: img.image_url,
-            alt_text: img.alt_text,
-            attribution: img.attribution,
-            license: img.license_name,
-          })) || [],
-          citations: detail.sources?.map(s => ({
-            title: s.title,
-            publisher: s.publisher,
-            url: s.url,
-          })) || [],
+          featured_image: detail.images?.[0]
+            ? {
+                url: detail.images[0].image_url,
+                alt_text: detail.images[0].alt_text,
+                attribution: detail.images[0].attribution,
+                license: detail.images[0].license_name,
+              }
+            : null,
+          gallery_images:
+            detail.images?.slice(1).map((img) => ({
+              url: img.image_url,
+              alt_text: img.alt_text,
+              attribution: img.attribution,
+              license: img.license_name,
+            })) || [],
+          citations:
+            detail.sources?.map((s) => ({
+              title: s.title,
+              publisher: s.publisher,
+              url: s.url,
+            })) || [],
           seo: {
             title: detail.seo_title,
             description: detail.seo_description,
@@ -131,31 +218,223 @@ export default function App() {
     }
   };
 
-  return (
-    <div className="min-h-screen bg-slate-950 text-slate-100">
-      {/* Dynamic View: Mobile-Optimized User Frontend OR Full-Control Admin Frontend */}
-      {portal === 'admin' ? (
-        <AdminPortal
-          onSelectArticle={handleSelectArticleFromDashboard}
-          onExitToUserPortal={switchToUser}
-        />
-      ) : (
-        <UserBlogPortal
-          posts={posts}
-          loading={loading}
-          onSelectPost={setSelectedPost}
-          onRefresh={loadFeed}
-          onSwitchToAdmin={switchToAdmin}
-        />
-      )}
+  // Client-side bookmark persistence in localStorage
+  const toggleBookmark = useCallback((post) => {
+    if (!post?.slug) return;
+    setBookmarks((prev) => {
+      const exists = prev.some((b) => b.slug === post.slug);
+      const next = exists
+        ? prev.filter((b) => b.slug !== post.slug)
+        : [post, ...prev];
+      try {
+        localStorage.setItem(BOOKMARKS_KEY, JSON.stringify(next));
+      } catch {
+        // Ignore storage quota errors
+      }
+      return next;
+    });
+  }, []);
 
-      {/* Full Article Reader Modal (Optimized for Mobile Screens & Full-Screen) */}
-      {selectedPost && (
-        <BlogPostModal
+  const isBookmarked = useCallback(
+    (slug) => bookmarks.some((b) => b.slug === slug),
+    [bookmarks]
+  );
+
+  // Filter stories by region, category, and search query
+  const filteredPosts = useMemo(() => {
+    const q = searchQuery.trim().toLowerCase();
+    return posts.filter((post) => {
+      if (activeRegion !== 'All' && post.region !== activeRegion) {
+        return false;
+      }
+      if (activeCategory !== 'All' && post.category !== activeCategory) {
+        return false;
+      }
+      if (!q) return true;
+      const haystack = [
+        post.title,
+        post.destination,
+        post.country,
+        post.region,
+        post.category,
+        post.summary,
+        post.unique_angle,
+      ]
+        .filter(Boolean)
+        .join(' ')
+        .toLowerCase();
+      return haystack.includes(q);
+    });
+  }, [posts, activeRegion, activeCategory, searchQuery]);
+
+  const handleOpenPost = async (post) => {
+    if (!post?.slug) return;
+    setSelectedPost(post);
+    window.location.hash = `post/${encodeURIComponent(post.slug)}`;
+
+    try {
+      const fresh = await api.getPostBySlug(post.slug);
+      if (fresh?.slug === post.slug) {
+        setSelectedPost(fresh);
+      }
+    } catch {
+      // Already displaying feed post cleanly
+    }
+  };
+
+  const handleClosePost = () => {
+    setSelectedPost(null);
+    if (window.location.hash.startsWith('#post/')) {
+      window.history.pushState('', document.title, window.location.pathname + window.location.search);
+    }
+  };
+
+  const handleResetFilters = () => {
+    setSearchQuery('');
+    setActiveRegion('All');
+    setActiveCategory('All');
+  };
+
+  const relatedPosts = useMemo(() => {
+    if (!selectedPost) return [];
+    return posts
+      .filter((p) => p.slug !== selectedPost.slug)
+      .sort((a, b) => {
+        const aScore =
+          (a.region === selectedPost.region ? 2 : 0) +
+          (a.category === selectedPost.category ? 1 : 0);
+        const bScore =
+          (b.region === selectedPost.region ? 2 : 0) +
+          (b.category === selectedPost.category ? 1 : 0);
+        return bScore - aScore;
+      })
+      .slice(0, 3);
+  }, [posts, selectedPost]);
+
+  // Article Detail View (accessible both from World Tourist feed and Admin preview)
+  if (selectedPost) {
+    return (
+      <>
+        <ArticleDetailPage
           post={selectedPost}
-          onClose={() => setSelectedPost(null)}
+          relatedPosts={relatedPosts}
+          isBookmarked={isBookmarked(selectedPost.slug)}
+          onToggleBookmark={toggleBookmark}
+          onBack={handleClosePost}
+          onOpenPost={handleOpenPost}
         />
-      )}
+        <BookmarksDrawer
+          isOpen={bookmarksOpen}
+          bookmarks={bookmarks}
+          onClose={() => setBookmarksOpen(false)}
+          onSelectPost={handleOpenPost}
+          onRemoveBookmark={toggleBookmark}
+        />
+      </>
+    );
+  }
+
+  // Hidden Admin View (reachable directly via /admin or #admin URL)
+  if (portal === 'admin') {
+    return (
+      <div className="min-h-screen bg-slate-950 text-slate-100">
+        <AdminPortal
+          onSelectArticle={handleSelectArticleFromAdmin}
+          onExitToUserPortal={exitToUserPortal}
+        />
+      </div>
+    );
+  }
+
+  const heroPost = filteredPosts[0] || null;
+  const gridPosts = filteredPosts.slice(1);
+
+  return (
+    <div className="min-h-screen bg-[#FAF9F6] text-[#1C1917] flex flex-col">
+      <Header
+        searchQuery={searchQuery}
+        onSearchChange={setSearchQuery}
+        regions={metadata.regions}
+        categories={metadata.categories}
+        activeRegion={activeRegion}
+        onSelectRegion={setActiveRegion}
+        activeCategory={activeCategory}
+        onSelectCategory={setActiveCategory}
+        bookmarkCount={bookmarks.length}
+        onOpenBookmarks={() => setBookmarksOpen(true)}
+        onGoHome={handleResetFilters}
+        filterMode={filterMode}
+        onFilterModeChange={setFilterMode}
+      />
+
+      <main className="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 lg:px-8 py-8 sm:py-10">
+        {error && (
+          <div className="mb-8">
+            <ErrorBanner message={error} onRetry={loadContent} />
+          </div>
+        )}
+
+        {loading ? (
+          <div className="space-y-8">
+            <HeroSkeleton />
+            <GridSkeleton />
+          </div>
+        ) : filteredPosts.length === 0 ? (
+          <EmptyState
+            searchQuery={searchQuery}
+            activeRegion={activeRegion}
+            activeCategory={activeCategory}
+            onReset={handleResetFilters}
+          />
+        ) : (
+          <>
+            <HeroSection
+              post={heroPost}
+              isBookmarked={isBookmarked(heroPost?.slug)}
+              onToggleBookmark={toggleBookmark}
+              onOpenPost={handleOpenPost}
+            />
+
+            {gridPosts.length > 0 && (
+              <>
+                <div className="flex items-baseline justify-between mb-6 pb-3 border-b border-[#E5E7EB]">
+                  <h2 className="font-editorial text-2xl sm:text-3xl font-bold text-[#1C1917]">
+                    Latest Dispatches
+                  </h2>
+                  <span className="text-xs sm:text-sm text-[#57534E]">
+                    Showing {filteredPosts.length}{' '}
+                    {filteredPosts.length === 1 ? 'story' : 'stories'}
+                  </span>
+                </div>
+
+                <EditorialGrid
+                  posts={gridPosts}
+                  isBookmarked={isBookmarked}
+                  onToggleBookmark={toggleBookmark}
+                  onOpenPost={handleOpenPost}
+                />
+              </>
+            )}
+          </>
+        )}
+      </main>
+
+      <footer className="border-t border-[#E5E7EB] bg-white py-8 mt-12">
+        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 flex flex-col sm:flex-row items-center justify-between gap-3 text-xs text-[#57534E]">
+          <span className="font-editorial text-base font-bold text-[#1C1917]">
+            World Tourist
+          </span>
+          <span>Global Destination Journalism &amp; Cultural Travel Guides</span>
+        </div>
+      </footer>
+
+      <BookmarksDrawer
+        isOpen={bookmarksOpen}
+        bookmarks={bookmarks}
+        onClose={() => setBookmarksOpen(false)}
+        onSelectPost={handleOpenPost}
+        onRemoveBookmark={toggleBookmark}
+      />
     </div>
   );
 }

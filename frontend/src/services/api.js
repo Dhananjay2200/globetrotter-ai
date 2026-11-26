@@ -1,60 +1,77 @@
 /**
- * GlobeTrotter AI - Frontend API Service Client.
- * Connects to the FastAPI backend with proxy support and full fallback handling.
+ * World Tourist & Admin Command Center - Centralized API Service Layer.
+ * Uses VITE_API_URL environment variable with the production Render URL as fallback.
  */
 
-const API_BASE = 'https://globetrotter-ai-e58e.onrender.com/api/v1';
+const rawBaseUrl =
+  import.meta.env.VITE_API_URL ?? 'https://globetrotter-ai-e58e.onrender.com';
+const API_ORIGIN = rawBaseUrl.replace(/\/+$/, '');
+const API_BASE = `${API_ORIGIN}/api/v1`;
 
 async function fetchJson(endpoint, options = {}) {
   const url = `${API_BASE}${endpoint}`;
   const headers = {
     'Content-Type': 'application/json',
+    Accept: 'application/json',
     ...(options.headers || {}),
   };
 
   // Attach admin session token if available
-  const token = localStorage.getItem('globetrotter_admin_token') || sessionStorage.getItem('globetrotter_admin_token');
+  const token =
+    localStorage.getItem('globetrotter_admin_token') ||
+    sessionStorage.getItem('globetrotter_admin_token');
   if (token && !headers['Authorization']) {
     headers['Authorization'] = `Bearer ${token}`;
   }
 
-  try {
-    const res = await fetch(url, { cache: 'no-cache', ...options, headers });
-    if (!res.ok) {
-      const errText = await res.text();
-      let errMsg = `Request failed: ${res.status}`;
-      try {
-        const errJson = JSON.parse(errText);
-        errMsg = errJson.detail || errMsg;
-      } catch (_) {
-        errMsg = errText || errMsg;
-      }
-      throw new Error(errMsg);
+  const res = await fetch(url, { cache: 'no-cache', ...options, headers });
+  if (!res.ok) {
+    const errText = await res.text();
+    let errMsg = `Request failed (${res.status})`;
+    try {
+      const errJson = JSON.parse(errText);
+      errMsg = errJson.detail || errMsg;
+    } catch {
+      errMsg = errText || errMsg;
     }
-    return await res.json();
-  } catch (err) {
-    console.error(`API call to ${url} failed:`, err);
-    throw err;
+    throw new Error(errMsg);
   }
+  return res.json();
 }
 
 export const api = {
-  // Public Feed & Post Viewer
-  async getFeed(category, country, limit = 100, offset = 0) {
+  // Public Feed, Post Viewer & Metadata (World Tourist)
+  async getFeed(categoryOrOpts = null, country = null, limit = 100, offset = 0) {
+    let cat = categoryOrOpts;
+    let cntry = country;
+    let lim = limit;
+    let off = offset;
+
+    if (categoryOrOpts && typeof categoryOrOpts === 'object' && !Array.isArray(categoryOrOpts)) {
+      cat = categoryOrOpts.category ?? null;
+      cntry = categoryOrOpts.country ?? null;
+      lim = categoryOrOpts.limit ?? 100;
+      off = categoryOrOpts.offset ?? 0;
+    }
+
     const params = new URLSearchParams();
-    if (category && category !== 'All') params.append('category', category);
-    if (country) params.append('country', country);
-    params.append('limit', limit);
-    params.append('offset', offset);
-    params.append('_t', Date.now());
+    if (cat && cat !== 'All') params.append('category', cat);
+    if (cntry) params.append('country', cntry);
+    params.append('limit', String(lim));
+    params.append('offset', String(off));
+    params.append('_t', String(Date.now()));
     return fetchJson(`/publish/feed?${params.toString()}`);
   },
 
   async getPostBySlug(slug) {
-    return fetchJson(`/publish/post/${slug}`);
+    return fetchJson(`/publish/post/${encodeURIComponent(slug)}`);
   },
 
-  // Publishing & Jobs
+  async getMetadata() {
+    return fetchJson('/topics/metadata');
+  },
+
+  // Publishing & Jobs (Admin Portal)
   async getPublishingJobs() {
     return fetchJson('/publish/jobs?limit=50');
   },
@@ -111,7 +128,7 @@ export const api = {
     return fetchJson('/workflow/stages');
   },
 
-  // 24/7 Autonomous Publisher (200 Articles/Day Engine)
+  // 24/7 Autonomous Publisher
   async getAutomationStatus() {
     return fetchJson('/automation/status');
   },
@@ -136,7 +153,7 @@ export const api = {
     return fetchJson('/health');
   },
 
-  // Admin Authentication (.env-configured)
+  // Admin Authentication
   async login(username, password) {
     const data = await fetchJson('/auth/login', {
       method: 'POST',
@@ -161,6 +178,9 @@ export const api = {
   },
 
   getStoredToken() {
-    return localStorage.getItem('globetrotter_admin_token') || sessionStorage.getItem('globetrotter_admin_token');
+    return (
+      localStorage.getItem('globetrotter_admin_token') ||
+      sessionStorage.getItem('globetrotter_admin_token')
+    );
   },
 };
